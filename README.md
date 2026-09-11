@@ -303,6 +303,30 @@ silently convert `admin` scope into `website` scope through a typo.
 
 A project using a hide-login plugin should still verify this surface itself.
 
+### Do not add a second layer that rewrites login URLs
+
+Reported from production, and worth more than the coverage gap above. A relocating plugin typically
+builds its own redirect target through `site_url()` and guards against looping by checking that both
+the current and target URLs still contain `wp-login.php`. Add your own filter on `site_url` or
+`login_url` to move the form, and **neither URL contains it any more, so the loop guard never fires**.
+The result is a redirect loop with no error message, on the login form, in production. It was caught
+only because a rate limiter killed the eleventh redirect.
+
+So: relocation belongs to exactly one layer. If a hide-login plugin owns it, do not also filter login
+URLs — and if you are removing that plugin in favour of your own alias, sequence the alias to land
+*after* the removal, never alongside it.
+
+### "Verified on preview" is worth less than it feels
+
+The same incident passed a full browser round-trip on preview — login, dashboard, logout, all green —
+and broke production anyway, because the relocating plugin was active on production and absent from
+preview. The environments differed in precisely the one way that mattered, and nothing in the process
+surfaced it before deploy.
+
+This package ships to several projects with different plugin sets, and login is where plugins collide
+most. Before shipping anything touching authentication, diff the **active plugin list** between the
+environment you verified in and the one you are deploying to. A green twin proves the twin works.
+
 ## Tests
 
 ```sh
