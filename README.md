@@ -22,7 +22,7 @@ A submodule must point at a whole repository — `git submodule add <repository>
 to put it, not a path to take from it. That is why these are separate repositories rather than
 directories inside one: a monorepo cannot be adopted a folder at a time.
 
-Two capabilities, one screen at **Settings → Site Access**:
+Everything lives on one screen at **Settings → Site Access**:
 
 - **Maintenance mode** — a checkbox. Everyone except a logged-in administrator receives a themeless
   503 screen.
@@ -30,6 +30,9 @@ Two capabilities, one screen at **Settings → Site Access**:
   to.
 - **Allowed IPs** — the allowlist, a list of who was recently denied with one-click adding, an
   optional trusted-proxy list, and a self-lockout override.
+- **Public AJAX actions** — the enumerated `admin-ajax.php` actions that stay reachable in `admin`
+  scope. Disabled and empty by default: every AJAX request is gated until an administrator lists
+  what the public frontend actually fetches and enables the section.
 
 ## What it protects, stated honestly
 
@@ -83,15 +86,59 @@ require_once __DIR__ . '/wp-awesome/site-access.php';
 
 ## Blocking scope
 
-| Value      | Frontend | Dashboard | Login form | `admin-ajax.php` |
-| ---------- | -------- | --------- | ---------- | ---------------- |
-| `disabled` | open     | open      | open       | open             |
-| `website`  | gated    | gated     | gated      | **gated**        |
-| `admin`    | open     | gated     | gated      | **exempt**       |
+| Value      | Frontend | Dashboard | Login form | `admin-ajax.php`                                            |
+| ---------- | -------- | --------- | ---------- | ----------------------------------------------------------- |
+| `disabled` | open     | open      | open       | open                                                        |
+| `website`  | gated    | gated     | gated      | **gated**                                                   |
+| `admin`    | open     | gated     | gated      | **gated unless the action is on the public action list**    |
 
-`admin` exempts AJAX because the public frontend shares `admin-ajax.php` — gating it would break the
-public site the scope exists to leave public. `website` has no such hole today and must never grow
-one: it is the scope for a site that should not be reachable at all.
+`admin` used to exempt `admin-ajax.php` wholesale, because the public frontend shares it. That also
+exempted every privileged AJAX handler on the site — core's, the plugins' and the theme's — which is
+exactly the surface this scope exists to gate. The exemption is now an enumerated list: an action
+name on the enabled public list bypasses the gate, and every other AJAX request is treated like the
+dashboard. The list is **empty on a fresh install**, so `admin` gates all AJAX until an administrator
+configures it.
+
+`website` ignores the list entirely and gates every request. It has no such hole today and must
+never grow one: it is the scope for a site that should not be reachable at all.
+
+### Public AJAX actions, listed one by one
+
+A public frontend that fetches content through `admin-ajax.php` needs those specific actions to stay
+reachable in `admin` scope. That need is real; a blanket exemption is not the answer to it. The
+answer is the list at **Settings → Site Access**, stored under
+`WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS`, controlled by `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED`.
+The section is disabled by default; disabling it preserves the list but exempts nothing.
+
+- **Empty means no exemption.** A missing, empty or comment-only list exempts nothing. The default
+  is the closed state, not a list of anything.
+- **Matching is exact, scalar and case-sensitive.** `get_campuses` is exempt when listed;
+  `GET_CAMPUSES`, `get_campuses_extra`, ` get_campuses` and `action[]=get_campuses` are not. The
+  action must be a string, and it is compared with strict equality.
+- **Malformed configuration fails closed as a whole.** A stored value that is not a string, or that
+  contains invalid UTF-8 or a control character, exempts nothing at all — not the readable
+  remainder. A list with a typo in it is evidence the list is not what its author believed.
+- **Names are printable UTF-8, not patterns.** Slash, spaces and punctuation are allowed and match
+  literally; control characters and invalid UTF-8 invalidate the whole list. Lines beginning with
+  `#` are comments; other `#` characters belong to the name. Surrounding ASCII spaces are removed,
+  and literal `\n` separators are normalised to line breaks. WordPress adds slashes to request
+  parameters before dispatch, so names are compared against the value it actually dispatches.
+- **It applies in `admin` scope only**, and only to requests WordPress classifies as AJAX. A
+  dashboard request carrying the same `action` query parameter is still gated.
+
+**The risk that must be stated: one action name covers both handlers.** WordPress registers
+`wp_ajax_{action}` and `wp_ajax_nopriv_{action}` under the same name, and the gate sees only that
+name. Listing an action therefore exempts it for **everyone, signed in or not** — it cannot tell an
+anonymous request from an administrator's. Only list read-only endpoints that are deliberately safe
+for an anonymous visitor. Never list `heartbeat`, `query-attachments`, or any name a plugin also
+uses for a privileged handler: the exemption would apply to that handler too, and nothing about the
+listing tells you the name is shared. Enumerate the public endpoints one at a time and keep the list
+short enough to review.
+
+The list is a stored setting rather than a host constant because it enumerates the site's own
+endpoints: it changes when the theme or a plugin adds a public fetch, which is a content-level
+operation, not a redeploy. The screen that edits it is behind `manage_options` and, in `admin`
+scope, is itself only reachable from an allowlisted address.
 
 Neither surface is matched by URL. The dashboard is matched with `is_admin()`, because `WP_ADMIN` is
 defined by the dashboard entry script before WordPress is loaded, which makes it true wherever the
@@ -120,6 +167,9 @@ as nobody looks. For a security control, prefer the loud failure.
 
 - **An empty or unparseable allowlist restricts nothing.** A corrupt option must not brick a remote
   machine whose only route in is the site itself. The settings screen shows this state as a warning.
+- **A missing, empty or malformed public AJAX list exempts nothing.** The default is the closed
+  state. A save containing an invalid action name is refused whole and leaves the stored list
+  untouched, rather than storing a list the administrator did not type.
 - **WP-CLI, cron and the CLI SAPI are never gated.** WP-CLI is the documented recovery path from a
   bad allowlist; gating it would make a lockout unrecoverable without database access.
 - **A save that would lock the current administrator out is refused**, unless they tick the override —
@@ -168,6 +218,8 @@ under generic option keys.
 | `WP_AWESOME_OPTION_ALLOWLIST`       | `wp_awesome_allowlist`    | Option key holding the allowlist.                               |
 | `WP_AWESOME_OPTION_TRUSTED_PROXIES` | `wp_awesome_trusted_proxies` | Option key holding the trusted-proxy list.                   |
 | `WP_AWESOME_OPTION_MAINTENANCE`     | `wp_awesome_maintenance`  | Option key holding the maintenance toggle.                      |
+| `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED` | `wp_awesome_public_ajax_enabled` | Option key for the disabled-by-default exemption toggle. |
+| `WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS` | `wp_awesome_public_ajax_actions` | Option key holding the public AJAX action list. Empty exempts nothing. |
 | `WP_AWESOME_OPTION_LEGACY_ENABLED`  | _(empty)_                 | Legacy "gate enabled" key to migrate from. Empty means none.    |
 | `WP_AWESOME_GATE_FALLBACK_SCOPE`    | `website`                 | Scope used when the stored value is missing or unrecognised.    |
 | `WP_AWESOME_GATE_ACCESS_LOG_PATH`   | _(empty)_                 | Access log to read the recently-denied report from.             |
@@ -221,6 +273,11 @@ Only the stored **value** is reinterpreted, in place, idempotently, on every loa
 The chain runs newest schema first, so an install on the oldest one still lands correctly. An
 unrecognised value is left in the database rather than overwritten: it is the only evidence that
 something restored the wrong data, and resolution already fails safe without needing to write.
+
+**The public AJAX action list has no migration, deliberately.** It is new, it has no earlier schema,
+and an install adopting this version starts with no exemptions — which is the safe state. If the
+public frontend fetches content from `admin-ajax.php`, configure the list and enable the section after deploy; until then
+those requests receive 403 from a blocked address in `admin` scope.
 
 ## The access-log report
 

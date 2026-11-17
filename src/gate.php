@@ -183,6 +183,132 @@ function wpaw_gate_request_is_admin_surface(): bool {
 	return is_admin() || wpaw_gate_request_is_login();
 }
 
+/** Whether an action is nonempty printable UTF-8, not an identifier or pattern. */
+function wpaw_is_ajax_action_name(string $action): bool {
+	return '' !== $action && 1 === preg_match('/\A[^\p{C}\p{Zl}\p{Zp}]+\z/u', $action);
+}
+
+/**
+ * Parses a stored public-AJAX list, or null when it is not usable at all.
+ *
+ * Null is a REFUSAL, not an error to repair. A value that is not a string, or that contains one
+ * entry which is not a plain action name, has no usable reading: the list's author cannot have meant
+ * the readable remainder, because they also typed something that is not an action name. Exempting
+ * the remainder would grant exactly the access nobody asked for.
+ *
+ * @return list<string>|null
+ */
+function wpaw_parse_public_ajax_actions(mixed $raw): ?array {
+	if (! is_string($raw)) {
+		return null;
+	}
+
+	// Only actual line breaks delimit entries. Reject controls before trimming, including in
+	// comments, so malformed input cannot be silently repaired into a different exemption.
+	$raw = str_replace(['\\r\\n', '\\n', '\\r'], "\n", $raw);
+	if (1 !== preg_match('/\A[^\p{C}\p{Zl}\p{Zp}\r\n]*(?:[\r\n][^\p{C}\p{Zl}\p{Zp}\r\n]*)*\z/u', $raw)) {
+		return null;
+	}
+
+	$actions = [];
+	foreach (preg_split('/\r\n|\r|\n/', $raw) as $line) {
+		$entry = trim($line, ' ');
+		if ('' === $entry || '#' === $entry[0]) {
+			continue;
+		}
+		if (! wpaw_is_ajax_action_name($entry)) {
+			return null;
+		}
+		$actions[] = $entry;
+	}
+
+	return array_values(array_unique($actions));
+}
+
+/**
+ * Whether the administrator has switched the public AJAX exemption section on.
+ *
+ * OFF BY DEFAULT, AND ANYTHING BUT '1' IS OFF. The toggle is a stored setting rather than a
+ * constant because the set of public endpoints changes at content-operation time; it is explicit
+ * because a site that does not fetch through `admin-ajax.php` should never expose one by accident.
+ * The strict comparison matters: `(bool) 'anything'` is true, and resolving the likeliest typo
+ * toward "on" would grant exemptions nobody asked for.
+ */
+function wpaw_gate_public_ajax_enabled(): bool {
+	$key = wpaw_option_key('public_ajax_enabled');
+
+	if ('' === $key) {
+		return false;
+	}
+
+	return '1' === get_option($key, '0');
+}
+
+/**
+ * The AJAX actions an administrator has declared public, or none.
+ *
+ * WHY A STORED SETTING RATHER THAN A CONSTANT. The set is site-specific and changes when the theme
+ * or a plugin adds a public fetch — a content operation an administrator performs, not a redeploy.
+ * The constant it replaced was hardcoded in the host stub, which made every new endpoint a code
+ * change and quietly granted whatever the list happened to contain at build time.
+ *
+ * OFF MEANS EMPTY, AND EMPTY MEANS NO EXEMPTION. The list is preserved in the database while the
+ * section is off, but this function refuses to apply it: switching the section off must gate every
+ * AJAX request without destroying the list the administrator typed.
+ *
+ * MALFORMED CONFIGURATION FAILS CLOSED AS A WHOLE, through `wpaw_parse_public_ajax_actions()`.
+ *
+ * @return list<string>
+ */
+function wpaw_gate_public_ajax_actions(): array {
+	if (! wpaw_gate_public_ajax_enabled()) {
+		return [];
+	}
+
+	$key = wpaw_option_key('public_ajax_actions');
+
+	if ('' === $key) {
+		return [];
+	}
+
+	return wpaw_parse_public_ajax_actions(get_option($key, '')) ?? [];
+}
+
+/**
+ * Whether the exemption section is disabled, or enabled with a usable, empty, or malformed list.
+ *
+ * The settings screen reports `malformed` explicitly. Failing closed silently is correct for the
+ * request, but an administrator looking at a list that is being ignored needs to be told that it is
+ * being ignored — otherwise the screen shows a configuration that is not in force.
+ *
+ * @return 'disabled'|'usable'|'empty'|'malformed'
+ */
+function wpaw_gate_public_ajax_actions_state(): string {
+	if (! wpaw_gate_public_ajax_enabled()) {
+		return 'disabled';
+	}
+
+	$key = wpaw_option_key('public_ajax_actions');
+
+	if ('' === $key) {
+		return 'empty';
+	}
+
+	$raw = get_option($key, '');
+
+	if ('' === $raw) {
+		return 'empty';
+	}
+
+	$actions = wpaw_parse_public_ajax_actions($raw);
+
+	if (null === $actions) {
+		return 'malformed';
+	}
+
+	return [] === $actions ? 'empty' : 'usable';
+}
+
 /**
  * Whether the current request must be denied.
  *
@@ -201,14 +327,29 @@ function wpaw_gate_should_deny(): bool {
 	}
 
 	if (WPAW_SCOPE_ADMIN === $scope) {
-		// The public frontend shares `admin-ajax.php`, so gating it in this scope would break the
-		// public site the scope exists to leave public. This exemption must NEVER be extended to
-		// `website` scope, which has no hole today and must keep none.
-		if (wp_doing_ajax()) {
+		// THE ONE SHARED SURFACE. `admin-ajax.php` serves the public frontend's fetch endpoints and
+		// every privileged handler core, plugins and the theme register, under one URL. It is NOT
+		// exempted wholesale: only action names an administrator listed bypass the IP check, and
+		// only while the optional section is explicitly enabled. The section is off by default and
+		// the list starts empty. An action is a string matched EXACTLY; an array, a near-miss, or a
+		// differently-cased name is not an exemption and falls through to the gate.
+		//
+		// The list is per ACTION NAME, not per authentication state: WordPress wires `wp_ajax_` and
+		// `wp_ajax_nopriv_` for the same name, so listing a name exempts both. Only names that are
+		// safe to run for an anonymous visitor belong here, and a name shared with a privileged
+		// handler must never be listed. See the README before configuring this.
+		// Core rebuilds $_REQUEST from GET then POST after mu-plugins load. Do not trust PHP's
+		// request_order (which can include cookies or omit POST) at this earlier point: core must
+		// dispatch the exact action that was checked here. POST takes precedence, even when null.
+		// Core also applies add_magic_quotes (addslashes) before dispatch, so compare that value.
+		$action = array_key_exists('action', $_POST) ? $_POST['action'] : ($_GET['action'] ?? null);
+		$ajax = wp_doing_ajax();
+
+		if ($ajax && is_string($action) && in_array(addslashes($action), wpaw_gate_public_ajax_actions(), true)) {
 			return false;
 		}
 
-		if (! wpaw_gate_request_is_admin_surface()) {
+		if (! $ajax && ! wpaw_gate_request_is_admin_surface()) {
 			return false;
 		}
 	}
