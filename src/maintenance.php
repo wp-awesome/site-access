@@ -1,6 +1,6 @@
 <?php
 /**
- * Maintenance mode: a 503 screen for everyone except a logged-in administrator.
+ * Maintenance mode: a 503 screen for every frontend request, administrators included.
  *
  * WHY AN ADMIN TOGGLE, NOT A WEB-SERVER FLAG FILE. A flag file is more robust — it works even when
  * WordPress or the database is down — but it needs someone with shell access every single time,
@@ -17,11 +17,27 @@
  * Every rule it needs travels in one string, and the only file it reads is an illustration the host
  * points at by absolute path.
  *
- * WHY `template_redirect`, NOT MU-PLUGIN LOAD LIKE THE GATE. The administrator exemption needs
- * `current_user_can()`, which needs the current user resolved — not yet true at mu-plugin load.
- * `template_redirect` is also skipped entirely for the dashboard and the login form, so an
- * administrator can always reach the toggle to switch this back off without any code here having to
- * special-case those URLs.
+ * WHY `template_redirect`, NOT MU-PLUGIN LOAD LIKE THE GATE. The gate ends a request that must
+ * never run; this replaces the response a frontend page was about to render, so it belongs where
+ * core hands the template over. The hook is also skipped for the dashboard, the login form,
+ * `admin-ajax.php`, REST and cron, which is exactly the set of surfaces maintenance mode must leave
+ * working — at mu-plugin load the screen would take those down with the site and remove the way back
+ * in.
+ *
+ * WHY NO ADMINISTRATOR EXEMPTION. Maintenance mode means the site is closed, and an operator decides
+ * that from the dashboard, which never reaches this hook. Exempting a capability instead made the
+ * same switch mean two different things depending on who was looking: the client reports a broken
+ * site while the administrator, signed in, sees it working and has nothing to reproduce. The screen
+ * is cheap to check and cheap to switch off, so the site stays closed for everyone who sees it.
+ *
+ * WHY THE LOGIN SURFACE IS THE ONE EXCEPTION. The dashboard and the default login form never run
+ * through `template_redirect`, so they need no special case. A host whose login form has MOVED to a
+ * path the frontend serves does: replacing that path with the maintenance screen would leave nobody
+ * able to sign in and switch maintenance off. `wpaw_gate_request_is_login()` is that surface as the
+ * package already defines it — the derived login URL plus the paths a host declares through
+ * `WP_AWESOME_GATE_LOGIN_PATHS` — and reusing it keeps maintenance from growing a URI heuristic of
+ * its own. The declared list is exact-match and refuses `/`, so it can never exempt the site
+ * wholesale.
  */
 
 declare(strict_types=1);
@@ -39,10 +55,16 @@ function wpaw_maintenance_enabled(): bool {
 
 /**
  * Whether the CURRENT request must receive the screen. Kept separate from the response below so the
- * policy — on, and not an administrator — is testable without headers, buffering and `exit()`.
+ * policy — on, and not the login surface — is testable without headers, buffering and `exit()`.
+ *
+ * The toggle is read FIRST so that switching maintenance off does not even consult the login surface,
+ * and so a host's declared-path callable is never invoked by a site that is not in maintenance.
+ *
+ * Unlike the gate, this runs after plugins load, so `wp_login_url()` already reflects a relocation
+ * filter here; the declared paths cover the form a plugin renders directly at its own path.
  */
 function wpaw_maintenance_should_serve(): bool {
-	return wpaw_maintenance_enabled() && ! current_user_can('manage_options');
+	return wpaw_maintenance_enabled() && ! wpaw_gate_request_is_login();
 }
 
 /**

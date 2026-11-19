@@ -24,8 +24,9 @@ directories inside one: a monorepo cannot be adopted a folder at a time.
 
 Everything lives on one screen at **Settings → Site Access**:
 
-- **Maintenance mode** — a checkbox. Everyone except a logged-in administrator receives a themeless
-  503 screen.
+- **Maintenance mode** — a checkbox. Every frontend request receives a themeless 503 screen,
+  administrators included. The dashboard and login form stay available, so switching it on never
+  locks you out of switching it off.
 - **Blocking scope** — `disabled`, `website` or `admin`. How much of the site the allowlist applies
   to.
 - **Allowed IPs** — the allowlist, a list of who was recently denied with one-click adding, an
@@ -203,10 +204,23 @@ feeds, the login form and the dashboard at once. Moving it to `admin_init` or an
 one check for a list of entry points that has to be kept complete forever, and the first one anybody
 forgets is a hole nobody sees.
 
-Maintenance mode is the deliberate exception: it runs on `template_redirect` at priority 1, because
-its administrator exemption needs `current_user_can()`, which needs the current user resolved. That
-hook is also skipped for the dashboard and the login form, so an administrator can always reach the
-toggle to switch it back off.
+Maintenance mode is the deliberate exception: it runs on `template_redirect` at priority 1. The gate
+ends a request that must never run, while the screen replaces the response a frontend page was about
+to render, so it belongs where core hands the template over. That hook is skipped for the dashboard,
+the login form, `admin-ajax.php`, REST and cron — exactly the surfaces maintenance mode has to leave
+working, because the dashboard is where the toggle is switched back off.
+
+**Maintenance mode has no administrator exemption.** Everyone who sees the site sees the screen,
+including a signed-in administrator. An exemption makes one switch mean two different things
+depending on who is looking: the client reports the site as broken while the administrator, signed
+in, sees it working and has nothing to reproduce. The cost of the honest version is bounded — the
+dashboard is one click away and never intercepted.
+
+The one surface the screen does not replace is the **login surface**, because replacing a relocated
+login form would leave nobody able to sign in and switch maintenance off. The standard form needs no
+help: `wp-login.php` never runs through `template_redirect`. A host that declares a relocated form
+through `WP_AWESOME_GATE_LOGIN_PATHS` (below) has it honoured here too. That mechanism is exact-match
+and refuses `/`, so it cannot exempt the site wholesale.
 
 ## Host constants
 
@@ -368,8 +382,14 @@ const WP_AWESOME_GATE_LOGIN_PATHS = 'acme_login_paths';
 ```
 
 The constant names a callable returning extra paths to treat as login surface. Undefined means
-unchanged behaviour. It applies in `admin` scope only, because `website` scope denies everything
-already and has no surface to add.
+unchanged behaviour. For the gate it applies in `admin` scope only, because `website` scope denies
+everything already and has no surface to add.
+
+**Maintenance mode honours the same declaration.** The screen runs on `template_redirect`, after
+plugins load, so `wp_login_url()` already reflects a relocation there — but a plugin that renders its
+form *directly* at its own custom path would have that path replaced by the 503 screen, leaving
+nobody able to sign in and switch maintenance off. A declared login path is never replaced by the
+screen. The list is exact-match and refuses `/`, so it cannot exempt the frontend wholesale.
 
 **Declare the redirector as well as the form.** Some relocation plugins — SiteGround Security's
 Custom Login URL among them — 302 from the custom path to `wp-login.php` rather than rendering there.

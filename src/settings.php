@@ -269,7 +269,8 @@ function wpaw_settings_render_page(): void {
 
 	if ($maintenance) {
 		echo '<div class="notice notice-warning inline"><p><strong>Maintenance mode is ON.</strong> '
-			. 'Everyone except a logged-in administrator receives a maintenance screen.</p></div>';
+			. 'Every visit to the public site receives a maintenance screen, administrators included. '
+			. 'The dashboard and login form stay available, so you can switch this back off.</p></div>';
 	}
 
 	if ('' !== $stored && ! wpaw_is_scope($stored)) {
@@ -320,8 +321,9 @@ function wpaw_settings_render_page(): void {
 	printf(
 		'<tr><th scope="row">Maintenance mode</th><td><label><input type="checkbox" name="%s" value="1"%s> '
 		. '<strong>Show a maintenance screen instead of the site</strong></label>'
-		. '<p class="description">Visitors receive a 503 response with a maintenance screen. Administrators logged in to '
-		. 'the dashboard are unaffected, so switching this on never locks you out of switching it back off.</p></td></tr>',
+		. '<p class="description">Every frontend request receives a 503 response with a maintenance screen, administrators '
+		. 'included, so what you see is what a visitor sees. The dashboard and login form are not affected, so switching '
+		. 'this on never locks you out of switching it back off.</p></td></tr>',
 		esc_attr(wpaw_option_key('maintenance')),
 		checked($maintenance, true, false)
 	);

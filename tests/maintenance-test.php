@@ -1,7 +1,8 @@
 <?php
 /**
  * Maintenance mode. Three properties are load-bearing and each has an assertion here:
- * 503 rather than 200, an administrator is exempt, and the payload needs neither theme nor database.
+ * 503 rather than 200, every frontend request is intercepted including an administrator's, and the
+ * payload needs neither theme nor database.
  */
 
 declare(strict_types=1);
@@ -13,16 +14,36 @@ const WP_AWESOME_MAINTENANCE_HEADING         = 'Down for a moment';
 const WP_AWESOME_MAINTENANCE_BODY            = 'We are upgrading the site.';
 const WP_AWESOME_MAINTENANCE_ILLUSTRATION    = __DIR__ . '/fixtures/illustration.svg';
 
+/**
+ * This host declares one relocated login path, so the single exemption the screen allows is exercised
+ * the way a real host supplies it rather than through a special case invented for the test.
+ *
+ * @return list<string>
+ */
+function wpaw_test_maintenance_login_paths(): array {
+	$GLOBALS['wpaw_test_maint_login_path_calls'] = ($GLOBALS['wpaw_test_maint_login_path_calls'] ?? 0) + 1;
+
+	return $GLOBALS['wpaw_test_maint_login_paths'] ?? [];
+}
+
+const WP_AWESOME_GATE_LOGIN_PATHS = 'wpaw_test_maintenance_login_paths';
+
+$GLOBALS['wpaw_test_maint_login_paths'] = ['/secretbase'];
+
 require_once dirname(__DIR__) . '/src/load.php';
 
 // --- the toggle -----------------------------------------------------------
 
 wpaw_test_reset(['test_maintenance' => '1']);
+$_SERVER['REQUEST_URI'] = '/about';
 wpaw_assert_true(wpaw_maintenance_enabled(), 'the toggle is on for the literal 1');
-wpaw_assert_true(wpaw_maintenance_should_serve(), 'a visitor who is not an administrator receives the screen');
+wpaw_assert_true(wpaw_maintenance_should_serve(), 'a visitor receives the screen on a frontend page');
 
 wpaw_test_set('can_manage', true);
-wpaw_assert_false(wpaw_maintenance_should_serve(), 'a logged-in administrator keeps seeing the live site');
+wpaw_assert_true(
+	wpaw_maintenance_should_serve(),
+	'a logged-in administrator receives the same screen, so the site is closed for whoever closed it'
+);
 
 foreach (['0', '', 'yes', 'true', '01'] as $stored) {
 	wpaw_test_reset(['test_maintenance' => $stored]);
@@ -30,7 +51,48 @@ foreach (['0', '', 'yes', 'true', '01'] as $stored) {
 }
 
 wpaw_test_reset([]);
+$_SERVER['REQUEST_URI'] = '/about';
+wpaw_test_set('can_manage', true);
 wpaw_assert_false(wpaw_maintenance_enabled(), 'maintenance mode is off by default');
+wpaw_assert_false(wpaw_maintenance_should_serve(), 'with the toggle off nothing is intercepted, administrators included');
+
+// An open site must behave exactly as it did before this policy existed, which includes not asking the
+// host anything: the login surface is consulted only after the toggle says maintenance is on.
+$GLOBALS['wpaw_test_maint_login_path_calls'] = 0;
+wpaw_maintenance_should_serve();
+wpaw_assert_same(
+	0,
+	$GLOBALS['wpaw_test_maint_login_path_calls'],
+	'with maintenance off the login surface is not consulted at all, so a slow or broken host callable cannot affect an open site'
+);
+
+// --- the login surface is the only exemption ------------------------------
+//
+// The dashboard and the default login form never reach `template_redirect`, so a standard host needs
+// no exemption. A host whose login form has MOVED to a frontend path does: replacing it with the
+// screen leaves nobody able to sign in and switch maintenance off. The package already has one
+// narrow way to declare that surface, and the screen reuses it rather than growing a URI heuristic.
+
+wpaw_test_reset(['test_maintenance' => '1']);
+$_SERVER['REQUEST_URI'] = '/wp-login.php';
+wpaw_assert_false(wpaw_maintenance_should_serve(), 'the default login form is never replaced by the screen, so signing in stays possible');
+
+wpaw_test_set('can_manage', true);
+wpaw_assert_false(wpaw_maintenance_should_serve(), 'and it is not replaced for an administrator either — the way back in is the same for everyone');
+
+$_SERVER['REQUEST_URI'] = '/secretbase?redirect_to=%2Fwp-admin%2F';
+wpaw_assert_false(wpaw_maintenance_should_serve(), 'a host-declared login path is never replaced by the screen, query string included');
+
+$_SERVER['REQUEST_URI'] = '/secretbase-elsewhere';
+wpaw_assert_true(wpaw_maintenance_should_serve(), 'the login exemption is exact, never a prefix — a neighbouring page still receives the screen');
+
+// The root is refused by the declared-path mechanism itself, which is what stops a configuration typo
+// from exempting the entire frontend from maintenance mode.
+$GLOBALS['wpaw_test_maint_login_paths'] = ['/'];
+$_SERVER['REQUEST_URI'] = '/';
+wpaw_assert_true(wpaw_maintenance_should_serve(), 'declaring the site root is refused, so the whole frontend can never be exempted');
+
+$GLOBALS['wpaw_test_maint_login_paths'] = [];
 
 // --- 503, never 200 -------------------------------------------------------
 
