@@ -1,7 +1,8 @@
 <?php
 /**
- * One screen: maintenance mode, blocking scope, allowed addresses, and an optional section listing
- * the AJAX actions the public frontend may use.
+ * One screen: maintenance mode, blocking scope, allowed addresses, and the list of AJAX actions the
+ * public frontend may use. The action list is the whole setting — an empty one exempts nothing —
+ * because a stored-yet-inert list is a state an administrator cannot see and an upgrade can get wrong.
  *
  * The scope is a stored setting rather than a constant because a three-value control cannot be
  * mistyped the way free text can, and because the person who needs to change it is the site owner,
@@ -66,13 +67,7 @@ function wpaw_settings_register(): void {
 		'default'           => '0',
 	]);
 
-	register_setting(WPAW_SETTINGS_GROUP, wpaw_option_key('public_ajax_enabled'), [
-		'type'              => 'string',
-		'sanitize_callback' => 'wpaw_sanitize_public_ajax_enabled',
-		'default'           => '0',
-	]);
-
-	register_setting(WPAW_SETTINGS_GROUP, wpaw_option_key('public_ajax_actions'), [
+	register_setting(WPAW_SETTINGS_GROUP, wpaw_option_key('public_ajax_list'), [
 		'type'              => 'string',
 		'sanitize_callback' => 'wpaw_sanitize_public_ajax_actions',
 		'default'           => '',
@@ -103,28 +98,6 @@ function wpaw_sanitize_toggle(mixed $value): string {
 	return '1' === $value ? '1' : '0';
 }
 
-/** Do not activate a retained list when the replacement submitted with the toggle is invalid. */
-function wpaw_sanitize_public_ajax_enabled(mixed $value): string {
-	if ('1' !== $value) {
-		return '0';
-	}
-
-	if (wpaw_gate_public_ajax_enabled()) {
-		return '1';
-	}
-
-	// options.php processes the toggle first; it trims and unslashes the list before saving it.
-	// Inspect the same submitted value now, including on add_option's second sanitization.
-	$submitted = $_POST[wpaw_option_key('public_ajax_actions')] ?? null;
-	$submitted = is_string($submitted) ? stripslashes(trim($submitted)) : null;
-	if (null === wpaw_parse_public_ajax_actions($submitted)) {
-		add_settings_error(WPAW_SETTINGS_GROUP, 'bad_ajax_enable', 'Public AJAX exemptions were not enabled because the submitted action list is missing or invalid.');
-		return '0';
-	}
-
-	return '1';
-}
-
 /** Normalize validated AJAX lines without byte-mode Unicode line splitting. */
 function wpaw_normalize_public_ajax_lines(string $raw): array {
 	$raw = str_replace(['\\r\\n', '\\n', '\\r'], "\n", $raw);
@@ -151,21 +124,28 @@ function wpaw_normalize_public_ajax_lines(string $raw): array {
 }
 
 /**
- * Validates the public AJAX action list, then stores it verbatim (normalised).
+ * Validates the allowed AJAX action list, then stores it verbatim (normalised).
  *
  * REFUSES THE WHOLE SAVE ON ONE BAD ENTRY. Dropping the offending line and saving the rest would
  * look like success while leaving the administrator with a list they did not type and cannot see
  * the difference in — and the direction of that surprise is an exemption they did not intend. The
- * stored list is returned untouched instead, and the error names the entry.
+ * list in force is returned untouched instead, and the error names the reason.
  *
  * An EMPTY value is a valid save: it removes every exemption, which is the fail-closed default.
+ *
+ * A REFUSED SAVE NEVER ADOPTS ANYTHING. The value written back is the list already in force — read
+ * through `wpaw_public_ajax_list_value()`, so an installation upgrading from the old enable
+ * checkbox keeps exactly the exemptions it already had, and one whose old list was switched off
+ * keeps none. A missing field (a partial POST, another screen's save) and a malformed one are both
+ * "no adoption": an upgrade never completes itself through a request the administrator did not
+ * make.
  */
 function wpaw_sanitize_public_ajax_actions(mixed $value): string {
-	$stored   = get_option(wpaw_option_key('public_ajax_actions'), '');
-	$previous = is_string($stored) ? $stored : '';
+	$in_force = wpaw_public_ajax_list_value();
+	$previous = is_string($in_force) ? $in_force : '';
 
 	if (! is_string($value)) {
-		add_settings_error(WPAW_SETTINGS_GROUP, 'bad_ajax_action', 'Public AJAX actions must be a text list. The action list was not saved.');
+		add_settings_error(WPAW_SETTINGS_GROUP, 'bad_ajax_action', 'Allowed AJAX actions must be a text list. The action list was not saved.');
 		return $previous;
 	}
 
@@ -173,7 +153,7 @@ function wpaw_sanitize_public_ajax_actions(mixed $value): string {
 		add_settings_error(
 			WPAW_SETTINGS_GROUP,
 			'bad_ajax_action',
-			'Public AJAX actions must be printable UTF-8 without control characters. The action list was not saved.'
+			'Allowed AJAX actions must be printable UTF-8 without control characters. The action list was not saved.'
 		);
 		return $previous;
 	}
@@ -261,20 +241,22 @@ function wpaw_settings_render_page(): void {
 		return;
 	}
 
-	$ip             = wpaw_client_ip();
-	$scope          = wpaw_scope();
-	$stored         = wpaw_stored_scope();
-	$allowlist      = (string) get_option(wpaw_option_key('allowlist'), '');
-	$proxies        = (string) get_option(wpaw_option_key('trusted_proxies'), '');
-	$maintenance    = wpaw_maintenance_enabled();
-	$restricting    = wpaw_gate_restricting();
-	$public_ajax    = wpaw_gate_public_ajax_actions_state();
-	$public_enabled = wpaw_gate_public_ajax_enabled();
-	$public_actions = wpaw_gate_public_ajax_actions();
-	$public_stored  = get_option(wpaw_option_key('public_ajax_actions'), '');
+	$ip              = wpaw_client_ip();
+	$scope           = wpaw_scope();
+	$stored          = wpaw_stored_scope();
+	$allowlist       = (string) get_option(wpaw_option_key('allowlist'), '');
+	$proxies         = (string) get_option(wpaw_option_key('trusted_proxies'), '');
+	$maintenance     = wpaw_maintenance_enabled();
+	$restricting     = wpaw_gate_restricting();
+	$public_ajax     = wpaw_gate_public_ajax_actions_state();
+	$public_actions  = wpaw_gate_public_ajax_actions();
+	// Edits start from the list that is IN FORCE, not from a row an older version left switched off:
+	// pre-filling parked names and saving would activate them without anybody retyping them.
+	$public_in_force = wpaw_public_ajax_list_value();
 	// A non-string row cannot be rendered as text; the error notice above explains why it is ignored.
-	$public_display = is_string($public_stored) ? $public_stored : '';
-	$public_count   = count($public_actions);
+	$public_display  = is_string($public_in_force) ? $public_in_force : '';
+	$public_parked   = wpaw_public_ajax_legacy_parked();
+	$public_count    = count($public_actions);
 
 	echo '<div class="wrap"><h1>' . esc_html(WPAW_SETTINGS_TITLE) . '</h1>';
 
@@ -307,15 +289,25 @@ function wpaw_settings_render_page(): void {
 	}
 
 	if ('malformed' === $public_ajax) {
-		echo '<div class="notice notice-error inline"><p><strong>The stored public AJAX action list cannot be used, so no action is exempt.</strong> '
+		echo '<div class="notice notice-error inline"><p><strong>The stored allowed AJAX action list cannot be used, so no action is exempt.</strong> '
 			. 'It is not a string, or it contains invalid UTF-8 or control characters. The gate fails closed rather than '
 			. 'exempting the readable part. Correct the list below and save it.</p></div>';
 	} elseif ('usable' === $public_ajax && WPAW_SCOPE_ADMIN === $scope) {
 		printf(
-			'<div class="notice notice-info inline"><p><strong>%d public AJAX action%s bypass the IP gate.</strong> '
+			'<div class="notice notice-info inline"><p><strong>%d allowed AJAX action%s bypass the IP gate.</strong> '
 			. 'They are reachable from any address, signed in or not. Review the list below against what those handlers do.</p></div>',
 			$public_count,
 			1 === $public_count ? '' : 's'
+		);
+	}
+
+	if ($public_parked) {
+		printf(
+			'<div class="notice notice-warning inline"><p><strong>An action list from an older version is preserved but not in force.</strong> '
+			. 'That version stored the names while its exemption was switched off, so they are not shown below and nothing is exempt. '
+			. 'They remain stored under <code>%s</code>. Retype the ones you want and save to activate them; saving an empty list '
+			. 'removes every exemption.</p></div>',
+			esc_html(wpaw_option_key('legacy_public_ajax_actions'))
 		);
 	}
 
@@ -370,27 +362,23 @@ function wpaw_settings_render_page(): void {
 	);
 
 	// DIRECTLY BELOW THE ALLOWLIST, because it is the same question one level down: which requests
-	// may reach the site. The section is optional and off by default; the list is preserved while it
-	// is off, so switching it back on never means retyping it.
+	// may reach the site. There is no separate switch: THE LIST IS THE SETTING, so "stored but off"
+	// cannot exist, cannot be mistaken for "on", and cannot be left behind by an upgrade.
 	printf(
-		'<tr><th scope="row">Public AJAX exemptions</th><td>'
-		. '<label><input type="checkbox" name="%s" value="1"%s> '
-		. '<strong>Exempt the listed AJAX actions from the IP gate</strong></label>'
-		. '<p class="description"><strong>Off by default.</strong> While off, every AJAX request in '
-		. '<em>Dashboard and login only</em> scope is gated, even if the list below is populated. Disabling '
-		. 'keeps the list, so it can be switched back on without retyping it.</p>'
-		. '<p><label for="wp-awesome-public-ajax">Public AJAX actions</label><br>'
+		'<tr><th scope="row"><label for="wp-awesome-public-ajax">Allowed AJAX actions</label></th><td>'
 		. '<textarea id="wp-awesome-public-ajax" name="%s" rows="6" cols="50" class="large-text code" '
-		. 'placeholder="get_news&#10;get_campuses">%s</textarea></p>'
-		. '<p class="description">One exact action name per line; slash and other printable characters are allowed. Lines beginning with # are comments. An enabled section with an empty list '
-		. 'exempts nothing. The list only matters in <em>Dashboard and login only</em> scope: the '
-		. 'whole-website scope gates every request. An entry exempts that action for everyone, signed in or not, '
-		. 'because WordPress registers both AJAX handlers under one name. Only list read-only endpoints that are '
-		. 'safe for an anonymous visitor, and never list a name that a privileged handler shares — the '
-		. 'exemption cannot tell the two apart.</p></td></tr>',
-		esc_attr(wpaw_option_key('public_ajax_enabled')),
-		checked($public_enabled, true, false),
-		esc_attr(wpaw_option_key('public_ajax_actions')),
+		. 'placeholder="get_news&#10;get_campuses">%s</textarea>'
+		. '<p class="description">In <em>Dashboard and login only</em> scope, allow the listed actions at '
+		. '<code>/wp-admin/admin-ajax.php</code> from any IP address. Every other AJAX request stays gated, '
+		. 'and <em>Whole website</em> scope gates every request whatever is listed here.</p>'
+		. '<p class="description">One exact action name per line; slash and other printable characters are '
+		. 'allowed. Lines beginning with <code>#</code> are comments. An empty, missing or unreadable list '
+		. 'exempts nothing, saving an empty list removes every exemption, and only the list shown here is in force. '
+		. 'An entry exempts that action for everyone, signed in or not, because WordPress registers both AJAX '
+		. 'handlers under one name. Only list read-only endpoints that are safe for an anonymous visitor, and '
+		. 'never list a name that a privileged handler shares — the exemption cannot tell the two apart.'
+		. '</p></td></tr>',
+		esc_attr(wpaw_option_key('public_ajax_list')),
 		esc_textarea($public_display)
 	);
 

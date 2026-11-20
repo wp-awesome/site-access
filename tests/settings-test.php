@@ -14,8 +14,11 @@ const WP_AWESOME_OPTION_SCOPE               = 'test_scope';
 const WP_AWESOME_OPTION_ALLOWLIST           = 'test_allowlist';
 const WP_AWESOME_OPTION_TRUSTED_PROXIES     = 'test_proxies';
 const WP_AWESOME_OPTION_MAINTENANCE         = 'test_maintenance';
-const WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED = 'test_public_ajax_enabled';
-const WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS = 'test_public_ajax';
+const WP_AWESOME_OPTION_PUBLIC_AJAX_LIST    = 'test_public_ajax_list';
+// The obsolete pair: read only while the list above has never been saved, and never registered, so
+// no control can write it back.
+const WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED = 'test_public_ajax_legacy_enabled';
+const WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS = 'test_public_ajax_legacy_actions';
 
 $log = tempnam(sys_get_temp_dir(), 'wpaw-log-');
 file_put_contents($log, sprintf(
@@ -33,13 +36,16 @@ wpaw_settings_register();
 
 $registered = wpaw_test_get('settings')['options'];
 wpaw_assert_same(
-	['test_scope', 'test_allowlist', 'test_proxies', 'test_maintenance', 'test_public_ajax_enabled', 'test_public_ajax'],
+	['test_scope', 'test_allowlist', 'test_proxies', 'test_maintenance', 'test_public_ajax_list'],
 	array_keys($registered),
-	'all six controls are registered, under the host\'s own option keys'
+	'all five controls are registered, under the host\'s own option keys'
 );
-wpaw_assert_same('0', $registered['test_public_ajax_enabled']['args']['default'], 'the public AJAX section registers disabled, so a fresh install exempts nothing');
-wpaw_assert_same('', $registered['test_public_ajax']['args']['default'], 'the public AJAX list registers with an empty default');
-wpaw_assert_same('wpaw_sanitize_public_ajax_enabled', $registered['test_public_ajax_enabled']['args']['sanitize_callback'], 'the toggle uses list-aware validation');
+wpaw_assert_same('', $registered['test_public_ajax_list']['args']['default'], 'the allowed AJAX list registers with an empty default');
+wpaw_assert_same('wpaw_sanitize_public_ajax_actions', $registered['test_public_ajax_list']['args']['sanitize_callback'], 'the list is validated when saved');
+wpaw_assert_true(
+	! isset($registered['test_public_ajax_legacy_enabled']) && ! isset($registered['test_public_ajax_legacy_actions']),
+	'the obsolete enable flag and its list are not registered, so no control can write them and nothing reads them on a normal save'
+);
 wpaw_assert_same(
 	1,
 	count(array_unique(array_column($registered, 'group'))),
@@ -108,16 +114,11 @@ wpaw_assert_same(
 	'a save normalises literal newlines, sorts entries, and keeps attached and inline comments'
 );
 
-// --- public AJAX actions --------------------------------------------------
+// --- allowed AJAX actions -------------------------------------------------
 //
-// This optional section replaced a blanket `admin`-scope AJAX exemption. It is OFF by default.
-// Every refusal below is the safe direction: an action that cannot be validated is not saved, and
-// a save is one list or none.
-
-wpaw_test_reset(['test_public_ajax_enabled' => '1', 'test_public_ajax' => 'get_campuses']);
-wpaw_assert_same('0', wpaw_sanitize_toggle('0'), 'the section can be switched off explicitly');
-wpaw_assert_same('get_campuses', get_option('test_public_ajax'), 'switching it off preserves the stored list');
-wpaw_assert_same('1', wpaw_sanitize_toggle('1'), 'and switched back on without retyping it');
+// This list replaced a blanket `admin`-scope AJAX exemption, and the checkbox that once switched it
+// on is gone: THE LIST IS THE SETTING. Every refusal below is the safe direction — an action that
+// cannot be validated is not saved, and a save is one list or none.
 
 wpaw_test_reset([]);
 wpaw_assert_same('', wpaw_sanitize_public_ajax_actions(''), 'an empty list is a valid save and stores no exemptions');
@@ -143,7 +144,7 @@ wpaw_assert_same(
 	'comments and blank lines are kept and blank lines dropped'
 );
 
-wpaw_test_reset(['test_public_ajax' => 'get_news']);
+wpaw_test_reset(['test_public_ajax_list' => 'get_news']);
 wpaw_assert_same(
 	'get_news',
 	wpaw_sanitize_public_ajax_actions("get_campuses\ninvalid\x00action"),
@@ -151,7 +152,7 @@ wpaw_assert_same(
 );
 wpaw_assert_same('bad_ajax_action', wpaw_test_get('settings_errors')[0]['code'], 'and names the reason');
 
-wpaw_test_reset(['test_public_ajax' => 'get_news']);
+wpaw_test_reset(['test_public_ajax_list' => 'get_news']);
 wpaw_assert_same(
 	"acf/fields/relationship/query\npublic action#1",
 	wpaw_sanitize_public_ajax_actions("acf/fields/relationship/query\npublic action#1"),
@@ -161,53 +162,86 @@ foreach (["get_campuses\ninvalid\taction", "get_campuses\ninvalid\xff"] as $bad)
 	wpaw_assert_same('get_news', wpaw_sanitize_public_ajax_actions($bad), 'control characters and invalid UTF-8 refuse the whole save');
 }
 
-wpaw_test_reset(['test_public_ajax' => 'get_news']);
+wpaw_test_reset(['test_public_ajax_list' => 'get_news']);
 wpaw_assert_same('get_news', wpaw_sanitize_public_ajax_actions(['future_privileged_action']), 'a malformed submitted list cannot become an action through string conversion');
 wpaw_assert_same('bad_ajax_action', wpaw_test_get('settings_errors')[0]['code'], 'a non-string submission is refused');
 
-// Model options.php order explicitly: update_option sanitizes the toggle first, then the list.
-// An absent option additionally passes through add_option and is sanitized a second time.
+// --- upgrading from the version that also stored an enable flag -----------
+//
+// A save carries the whole permission state with it, so a request that does not deliberately set
+// the list must not change what is exempt. `options.php` posts the textarea whenever this screen is
+// saved; the cases below are the ones where the field is absent or unusable, and none of them may
+// promote a row the older version left switched off.
+
+wpaw_test_reset(['test_public_ajax_legacy_enabled' => '1', 'test_public_ajax_legacy_actions' => "get_news\nget_campuses"]);
+wpaw_assert_same(
+	"get_news\nget_campuses",
+	wpaw_sanitize_public_ajax_actions(null),
+	'a missing submission keeps the legacy list exactly as it was already in force'
+);
+
+wpaw_test_reset(['test_public_ajax_legacy_enabled' => '0', 'test_public_ajax_legacy_actions' => 'get_campuses']);
+wpaw_assert_same('', wpaw_sanitize_public_ajax_actions(null), 'a missing submission cannot adopt a legacy list that was switched off');
+wpaw_assert_same('', wpaw_sanitize_public_ajax_actions("get_news\ninvalid\x00action"), 'an invalid submission cannot adopt it either');
+wpaw_assert_same('get_campuses', get_option('test_public_ajax_legacy_actions'), 'and the parked names are neither adopted nor destroyed');
+
+wpaw_test_reset([]);
+wpaw_assert_same('', wpaw_sanitize_public_ajax_actions(null), 'a fresh install has nothing to preserve when the field is missing');
+
+// An empty save is a deliberate revocation, and it must survive the upgrade fallback.
 wpaw_test_reset([
-	'test_scope' => 'admin', 'test_allowlist' => '198.51.100.0/24',
-	'test_public_ajax_enabled' => '0', 'test_public_ajax' => 'retained_action',
+	'test_scope'                      => 'admin',
+	'test_allowlist'                  => '198.51.100.0/24',
+	'test_public_ajax_legacy_enabled' => '1',
+	'test_public_ajax_legacy_actions' => 'get_campuses',
 ]);
-$_POST = ['test_public_ajax_enabled' => '1', 'test_public_ajax' => "replacement\x00invalid"];
-update_option('test_public_ajax_enabled', wpaw_sanitize_public_ajax_enabled($_POST['test_public_ajax_enabled']));
-update_option('test_public_ajax', wpaw_sanitize_public_ajax_actions(stripslashes(trim($_POST['test_public_ajax']))));
-wpaw_assert_same('0', get_option('test_public_ajax_enabled'), 'invalid replacement cannot enable a retained list');
-wpaw_assert_same('retained_action', get_option('test_public_ajax'), 'invalid replacement preserves the retained list');
-wpaw_assert_same('bad_ajax_enable', wpaw_test_get('settings_errors')[0]['code'], 'the failed enabling is reported');
 wpaw_test_set('is_admin', true);
 wpaw_test_set('doing_ajax', true);
-$_GET = ['action' => 'retained_action'];
-wpaw_assert_true(wpaw_gate_should_deny(), 'retained action remains gated after the failed save');
+$_GET = ['action' => 'get_campuses'];
+$_POST = [];
+wpaw_assert_false(wpaw_gate_should_deny(), 'the legacy list is in force before anybody saves');
+update_option('test_public_ajax_list', wpaw_sanitize_public_ajax_actions(''));
+wpaw_assert_true(wpaw_gate_should_deny(), 'saving an empty list revokes it');
+wpaw_assert_same('get_campuses', get_option('test_public_ajax_legacy_actions'), 'the old row is preserved and stays inert');
 
-wpaw_test_reset(['test_public_ajax' => 'retained_action']);
-$_POST = ['test_public_ajax_enabled' => '1', 'test_public_ajax' => "replacement\x00invalid"];
-$enabled = wpaw_sanitize_public_ajax_enabled($_POST['test_public_ajax_enabled']);
-$enabled = wpaw_sanitize_public_ajax_enabled($enabled); // absent toggle: add_option sanitizes again.
-update_option('test_public_ajax_enabled', $enabled);
-update_option('test_public_ajax', wpaw_sanitize_public_ajax_actions(stripslashes(trim($_POST['test_public_ajax']))));
-wpaw_assert_same('0', get_option('test_public_ajax_enabled'), 'first-save double sanitization cannot enable a retained list with an invalid replacement');
-wpaw_assert_same('retained_action', get_option('test_public_ajax'), 'the invalid first-save replacement does not change the list');
+// A deliberate save of a valid list is the one path that adopts names, including names that were
+// parked: the screen renders those as absent, so adopting them takes typing them.
+wpaw_test_reset([
+	'test_scope'                      => 'admin',
+	'test_allowlist'                  => '198.51.100.0/24',
+	'test_public_ajax_legacy_enabled' => '0',
+	'test_public_ajax_legacy_actions' => 'get_campuses',
+]);
+update_option('test_public_ajax_list', wpaw_sanitize_public_ajax_actions("get_campuses\nget_news"));
+wpaw_assert_same("get_campuses\nget_news", get_option('test_public_ajax_list'), 'the deliberate save stores the typed list');
+wpaw_test_set('is_admin', true);
+wpaw_test_set('doing_ajax', true);
+$_SERVER['REMOTE_ADDR'] = '203.0.113.9';
+$_GET                    = ['action' => 'get_campuses'];
+$_POST                   = [];
+$_REQUEST                = $_GET;
+wpaw_assert_false(wpaw_gate_should_deny(), 'and the saved action is exempt from the admin-scope gate');
+$_GET = ['action' => 'heartbeat'];
+$_REQUEST = $_GET;
+wpaw_assert_true(wpaw_gate_should_deny(), 'while an unlisted action stays gated');
+$_GET = ['action' => 'get_campuses'];
+$_POST = ['action' => 'future_privileged_action'];
+wpaw_assert_true(wpaw_gate_should_deny(), 'and a POST action overrides the listed GET action');
 
-wpaw_test_reset(['test_public_ajax_enabled' => '1', 'test_public_ajax' => 'retained_action']);
-$_POST = ['test_public_ajax' => "invalid\x00entry"];
-wpaw_assert_same('1', wpaw_sanitize_public_ajax_enabled('1'), 'invalid replacement leaves an already-enabled toggle unchanged');
-wpaw_assert_same('0', wpaw_sanitize_public_ajax_enabled(null), 'disabling is always permitted despite an invalid replacement');
-wpaw_assert_same('retained_action', wpaw_sanitize_public_ajax_actions($_POST['test_public_ajax']), 'disabling with an invalid replacement preserves the list');
+// The saved string is exactly what the gate consumes, and a second sanitization pass — `add_option`
+// performs one on the first save of a row — must not change it.
 
-wpaw_test_reset(['test_scope' => 'admin', 'test_allowlist' => '198.51.100.0/24']);
-$_POST = ['test_public_ajax_enabled' => '1', 'test_public_ajax' => addslashes("# UTF-8\r\naąb")];
-$enabled = wpaw_sanitize_public_ajax_enabled($_POST['test_public_ajax_enabled']);
-$enabled = wpaw_sanitize_public_ajax_enabled($enabled); // add_option sanitizes again.
-update_option('test_public_ajax_enabled', $enabled);
-$value = wpaw_sanitize_public_ajax_actions(stripslashes(trim($_POST['test_public_ajax'])));
-$value = wpaw_sanitize_public_ajax_actions($value); // add_option sanitizes again.
-update_option('test_public_ajax', $value);
-wpaw_assert_same('1', get_option('test_public_ajax_enabled'), 'first save enables a valid submitted list');
-wpaw_assert_same("# UTF-8\naąb", get_option('test_public_ajax'), 'double sanitization preserves UTF-8 and comments');
-wpaw_assert_same(['aąb'], wpaw_parse_public_ajax_actions(get_option('test_public_ajax')), 'the saved UTF-8 action parses exactly');
+wpaw_test_reset([]);
+$once = wpaw_sanitize_public_ajax_actions("# UTF-8\r\naąb");
+wpaw_assert_same("# UTF-8\naąb", $once, 'UTF-8 and comments survive the round trip');
+wpaw_assert_same($once, wpaw_sanitize_public_ajax_actions($once), 'a second sanitization pass changes nothing');
+wpaw_assert_same(['aąb'], wpaw_parse_public_ajax_actions($once), 'the saved UTF-8 action parses exactly');
+
+wpaw_test_reset([
+	'test_scope'            => 'admin',
+	'test_allowlist'        => '198.51.100.0/24',
+	'test_public_ajax_list' => $once,
+]);
 wpaw_test_set('is_admin', true);
 wpaw_test_set('doing_ajax', true);
 $_GET = ['action' => 'aąb'];
@@ -215,39 +249,6 @@ $_POST = [];
 wpaw_assert_false(wpaw_gate_should_deny(), 'the saved UTF-8 action matches the gate exactly');
 $_GET = ['action' => 'aąb-extra'];
 wpaw_assert_true(wpaw_gate_should_deny(), 'a near-match remains gated after the round trip');
-
-wpaw_test_reset(['test_public_ajax' => 'retained_action']);
-$_POST = [];
-wpaw_assert_same('0', wpaw_sanitize_public_ajax_enabled('1'), 'an absent submitted list cannot enable a retained action');
-
-// The saved string is exactly what the gate consumes: a round trip through the sanitizer must
-// exempt the listed action and nothing else.
-
-wpaw_test_reset([]);
-$saved = wpaw_sanitize_public_ajax_actions("get_campuses\nget_news");
-
-wpaw_test_reset([
-	'test_scope'               => 'admin',
-	'test_allowlist'           => '198.51.100.0/24',
-	'test_public_ajax'         => $saved,
-	'test_public_ajax_enabled' => '1',
-]);
-wpaw_test_set('is_admin', true);
-wpaw_test_set('doing_ajax', true);
-$_SERVER['REMOTE_ADDR'] = '203.0.113.9';
-$_GET                    = ['action' => 'get_campuses'];
-$_POST                   = [];
-$_REQUEST                = $_GET;
-wpaw_assert_false(wpaw_gate_should_deny(), 'a saved public action is exempt from the admin-scope gate while the section is enabled');
-$_GET = ['action' => 'heartbeat'];
-$_REQUEST = $_GET;
-wpaw_assert_true(wpaw_gate_should_deny(), 'an action missing from the saved list stays gated');
-
-update_option('test_public_ajax_enabled', '0');
-$_GET = ['action' => 'get_campuses'];
-$_REQUEST = $_GET;
-wpaw_assert_true(wpaw_gate_should_deny(), 'switching the section off gates the saved action again');
-wpaw_assert_same($saved, get_option('test_public_ajax'), 'and the saved list is still there');
 
 // --- trusted proxies ------------------------------------------------------
 
@@ -279,25 +280,28 @@ wpaw_assert_contains('value="admin"', $screen, 'the scope control offers admin')
 wpaw_assert_contains('name="test_maintenance"', $screen, 'the maintenance checkbox is on the same screen');
 wpaw_assert_contains('name="test_allowlist"', $screen, 'the allowlist textarea is on the same screen');
 wpaw_assert_contains('name="test_proxies"', $screen, 'the trusted-proxy textarea is on the same screen');
-wpaw_assert_contains('name="test_public_ajax"', $screen, 'the public AJAX action list is on the same screen');
-wpaw_assert_contains('name="test_public_ajax_enabled"', $screen, 'the section has an explicit enable checkbox');
-wpaw_assert_contains('Off by default', $screen, 'the screen states that the section is disabled by default');
-wpaw_assert_contains('keeps the list', $screen, 'the screen states that disabling preserves the list');
+wpaw_assert_contains('name="test_public_ajax_list"', $screen, 'the allowed AJAX action list is on the same screen');
+wpaw_assert_not_contains('name="test_public_ajax_legacy_enabled"', $screen, 'the obsolete enable checkbox is gone from the screen');
 wpaw_assert_contains('exempts nothing', $screen, 'the screen states that an empty list exempts nothing');
+wpaw_assert_contains('/wp-admin/admin-ajax.php', $screen, 'the help names the endpoint the list applies to');
 wpaw_assert_contains('signed in or not', $screen, 'the screen states that one entry covers both handlers, so privileged action names are a risk');
 wpaw_assert_contains('Site Access', $screen, 'the page heading matches the menu item');
-wpaw_assert_not_contains('name="test_public_ajax_enabled" value="1" checked', $screen, 'the section renders unchecked when it has never been enabled');
 
-// The section sits DIRECTLY below the IP allowlist, and the list sits inside it.
+// THE LEFT LABEL BELONGS TO THE TEXTAREA: `for` names its `id`, so the label is a real label and
+// not a caption next to a control it does not own.
+wpaw_assert_contains('<label for="wp-awesome-public-ajax">Allowed AJAX actions</label>', $screen, 'the row is labelled Allowed AJAX actions');
+wpaw_assert_contains('id="wp-awesome-public-ajax"', $screen, 'and that label points at the textarea\'s own id');
+
+// The list sits DIRECTLY below the IP allowlist and above the trusted-proxy control, and it is the
+// only control in that row: no checkbox, so no stored-yet-inert state.
 $allowlist_pos = strpos($screen, 'name="test_allowlist"');
-$enabled_pos   = strpos($screen, 'name="test_public_ajax_enabled"');
-$actions_pos   = strpos($screen, 'name="test_public_ajax"');
+$actions_pos   = strpos($screen, 'name="test_public_ajax_list"');
 $proxies_pos   = strpos($screen, 'name="test_proxies"');
 
-wpaw_assert_true(false !== $allowlist_pos && false !== $enabled_pos && false !== $actions_pos && false !== $proxies_pos, 'all four controls render');
-wpaw_assert_true($allowlist_pos < $enabled_pos, 'the public AJAX section begins directly below the IP allowlist');
-wpaw_assert_true($enabled_pos < $actions_pos, 'the enable checkbox precedes the action list inside the section');
-wpaw_assert_true($actions_pos < $proxies_pos, 'the public AJAX section ends before the trusted-proxy control');
+wpaw_assert_true(false !== $allowlist_pos && false !== $actions_pos && false !== $proxies_pos, 'all three controls render');
+wpaw_assert_true($allowlist_pos < $actions_pos, 'the allowed AJAX list begins directly below the IP allowlist');
+wpaw_assert_true($actions_pos < $proxies_pos, 'and ends before the trusted-proxy control');
+wpaw_assert_same(1, substr_count($screen, 'name="test_public_ajax_list"'), 'the list is posted once, by the textarea alone');
 wpaw_assert_contains('name="wp_awesome_force_save"', $screen, 'the self-lockout override is on the same screen');
 wpaw_assert_contains('198.51.100.77', $screen, 'a recently blocked address is listed');
 wpaw_assert_contains('wpawAddAddress(\'198.51.100.77\')', $screen, 'and can be added to the allowlist with one click');
@@ -312,44 +316,73 @@ wpaw_assert_contains('corrupt-value', $screen, 'an unrecognised stored scope is 
 
 // A list that is being ignored must not render as a list that is in force.
 wpaw_test_reset([
-	'test_scope'               => 'admin',
-	'test_allowlist'           => '203.0.113.0/24',
-	'test_public_ajax'         => "get_campuses\nbroken\x00entry",
-	'test_public_ajax_enabled' => '1',
+	'test_scope'            => 'admin',
+	'test_allowlist'        => '203.0.113.0/24',
+	'test_public_ajax_list' => "get_campuses\nbroken\x00entry",
 ]);
 wpaw_test_set('can_manage', true);
 ob_start();
 wpaw_settings_render_page();
 $screen = (string) ob_get_clean();
-wpaw_assert_contains('cannot be used', $screen, 'a malformed stored AJAX list is surfaced as being ignored while the section is enabled');
+wpaw_assert_contains('cannot be used', $screen, 'a malformed stored AJAX list is surfaced as being ignored');
+wpaw_assert_not_contains('bypass the IP gate', $screen, 'and no bypass is claimed for it');
 
 wpaw_test_reset([
-	'test_scope'               => 'admin',
-	'test_allowlist'           => '203.0.113.0/24',
-	'test_public_ajax'         => "get_campuses\nget_news",
-	'test_public_ajax_enabled' => '1',
+	'test_scope'            => 'admin',
+	'test_allowlist'        => '203.0.113.0/24',
+	'test_public_ajax_list' => "get_campuses\nget_news",
 ]);
 wpaw_test_set('can_manage', true);
 ob_start();
 wpaw_settings_render_page();
 $screen = (string) ob_get_clean();
-wpaw_assert_contains('2 public AJAX actions bypass the IP gate', $screen, 'the screen states how many actions bypass the gate and that the exemption is not authentication-aware');
+wpaw_assert_contains('2 allowed AJAX actions bypass the IP gate', $screen, 'the screen states how many actions bypass the gate and that the exemption is not authentication-aware');
 wpaw_assert_contains('signed in or not', $screen, 'and repeats the anonymous-caller risk next to the count');
-wpaw_assert_contains('name="test_public_ajax_enabled" value="1" checked', $screen, 'and the enable checkbox renders checked');
+wpaw_assert_contains(">get_campuses\nget_news</textarea>", $screen, 'and the list in force is the one the textarea shows');
 
-// A disabled section with a valid stored list is inert, so the screen must not claim the actions
-// bypass anything.
+// `website` scope ignores the list, so the screen must not claim the actions bypass anything.
 wpaw_test_reset([
-	'test_scope'       => 'admin',
-	'test_allowlist'   => '203.0.113.0/24',
-	'test_public_ajax' => "get_campuses\nget_news",
+	'test_scope'            => 'website',
+	'test_allowlist'        => '203.0.113.0/24',
+	'test_public_ajax_list' => "get_campuses\nget_news",
 ]);
 wpaw_test_set('can_manage', true);
 ob_start();
 wpaw_settings_render_page();
 $screen = (string) ob_get_clean();
-wpaw_assert_not_contains('bypass the IP gate', $screen, 'a disabled section does not claim any action bypasses the gate');
-wpaw_assert_contains('get_campuses', $screen, 'but the preserved list is still visible for editing');
+wpaw_assert_not_contains('bypass the IP gate', $screen, 'website scope does not claim any action bypasses the gate');
+wpaw_assert_contains('get_campuses', $screen, 'but the list is still visible for editing');
+
+// UPGRADING: an enabled legacy list is still in force, so it is what the textarea shows.
+wpaw_test_reset([
+	'test_scope'                      => 'admin',
+	'test_allowlist'                  => '203.0.113.0/24',
+	'test_public_ajax_legacy_enabled' => '1',
+	'test_public_ajax_legacy_actions' => 'get_campuses',
+]);
+wpaw_test_set('can_manage', true);
+ob_start();
+wpaw_settings_render_page();
+$screen = (string) ob_get_clean();
+wpaw_assert_contains('>get_campuses</textarea>', $screen, 'a legacy list that is still in force is shown, so saving the screen does not lose it');
+wpaw_assert_not_contains('preserved but not in force', $screen, 'and it is not described as parked');
+
+// A legacy list that was switched off is PRESERVED BUT NOT SHOWN. Pre-filling it would adopt it on
+// the next save of any field on this screen, which is exactly the silent activation an upgrade must
+// not perform.
+wpaw_test_reset([
+	'test_scope'                      => 'admin',
+	'test_allowlist'                  => '203.0.113.0/24',
+	'test_public_ajax_legacy_enabled' => '0',
+	'test_public_ajax_legacy_actions' => 'get_campuses',
+]);
+wpaw_test_set('can_manage', true);
+ob_start();
+wpaw_settings_render_page();
+$screen = (string) ob_get_clean();
+wpaw_assert_contains('preserved but not in force', $screen, 'a legacy list that was switched off is explained');
+wpaw_assert_contains('test_public_ajax_legacy_actions', $screen, 'and the notice names where the names are kept');
+wpaw_assert_not_contains('>get_campuses</textarea>', $screen, 'but the names are not pre-filled into the form');
 
 unlink($log);
 

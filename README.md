@@ -30,9 +30,8 @@ Everything lives on one screen at **Settings → Site Access**:
   to.
 - **Allowed IPs** — the allowlist, a list of who was recently denied with one-click adding, an
   optional trusted-proxy list, and a self-lockout override.
-- **Public AJAX actions** — the enumerated `admin-ajax.php` actions that stay reachable in `admin`
-  scope. Disabled and empty by default: every AJAX request is gated until an administrator lists
-  what the public frontend actually fetches and enables the section.
+- **Allowed AJAX actions** — the enumerated `admin-ajax.php` actions that stay reachable in `admin`
+  scope. The list is the whole setting: empty by default, and an empty list exempts nothing.
 
 ## What it protects, stated honestly
 
@@ -90,25 +89,27 @@ require_once __DIR__ . '/wp-awesome/site-access.php';
 | ---------- | -------- | --------- | ---------- | ----------------------------------------------------------- |
 | `disabled` | open     | open      | open       | open                                                        |
 | `website`  | gated    | gated     | gated      | **gated**                                                   |
-| `admin`    | open     | gated     | gated      | **gated unless the action is on the public action list**    |
+| `admin`    | open     | gated     | gated      | **gated unless the action is on the allowed action list**    |
 
 `admin` used to exempt `admin-ajax.php` wholesale, because the public frontend shares it. That also
 exempted every privileged AJAX handler on the site — core's, the plugins' and the theme's — which is
 exactly the surface this scope exists to gate. The exemption is now an enumerated list: an action
-name on the enabled public list bypasses the gate, and every other AJAX request is treated like the
+name on the stored list bypasses the gate, and every other AJAX request is treated like the
 dashboard. The list is **empty on a fresh install**, so `admin` gates all AJAX until an administrator
-configures it.
+lists the actions the public frontend actually fetches.
 
 `website` ignores the list entirely and gates every request. It has no such hole today and must
 never grow one: it is the scope for a site that should not be reachable at all.
 
-### Public AJAX actions, listed one by one
+### Allowed AJAX actions, listed one by one
 
 A public frontend that fetches content through `admin-ajax.php` needs those specific actions to stay
 reachable in `admin` scope. That need is real; a blanket exemption is not the answer to it. The
-answer is the list at **Settings → Site Access**, stored under
-`WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS`, controlled by `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED`.
-The section is disabled by default; disabling it preserves the list but exempts nothing.
+answer is the list at **Settings → Site Access**, stored under `WP_AWESOME_OPTION_PUBLIC_AJAX_LIST`.
+
+**The list is the setting.** There is no second switch that could leave names stored but inert, so
+an administrator cannot save a list and be wrong about whether it is in force. Deleting every line
+and saving is a revocation, not a pause.
 
 - **Empty means no exemption.** A missing, empty or comment-only list exempts nothing. The default
   is the closed state, not a list of anything.
@@ -167,9 +168,9 @@ as nobody looks. For a security control, prefer the loud failure.
 
 - **An empty or unparseable allowlist restricts nothing.** A corrupt option must not brick a remote
   machine whose only route in is the site itself. The settings screen shows this state as a warning.
-- **A missing, empty or malformed public AJAX list exempts nothing.** The default is the closed
-  state. A save containing an invalid action name is refused whole and leaves the stored list
-  untouched, rather than storing a list the administrator did not type.
+- **A missing, empty, comment-only or malformed allowed-AJAX list exempts nothing.** The default is
+  the closed state. A save containing an invalid action name is refused whole and leaves the list in
+  force untouched, rather than storing a list the administrator did not type.
 - **WP-CLI, cron and the CLI SAPI are never gated.** WP-CLI is the documented recovery path from a
   bad allowlist; gating it would make a lockout unrecoverable without database access.
 - **A save that would lock the current administrator out is refused**, unless they tick the override —
@@ -218,8 +219,9 @@ under generic option keys.
 | `WP_AWESOME_OPTION_ALLOWLIST`       | `wp_awesome_allowlist`    | Option key holding the allowlist.                               |
 | `WP_AWESOME_OPTION_TRUSTED_PROXIES` | `wp_awesome_trusted_proxies` | Option key holding the trusted-proxy list.                   |
 | `WP_AWESOME_OPTION_MAINTENANCE`     | `wp_awesome_maintenance`  | Option key holding the maintenance toggle.                      |
-| `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED` | `wp_awesome_public_ajax_enabled` | Option key for the disabled-by-default exemption toggle. |
-| `WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS` | `wp_awesome_public_ajax_actions` | Option key holding the public AJAX action list. Empty exempts nothing. |
+| `WP_AWESOME_OPTION_PUBLIC_AJAX_LIST` | `wp_awesome_public_ajax_list` | Option key holding the allowed AJAX action list. Empty exempts nothing. |
+| `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED` | `wp_awesome_public_ajax_enabled` | Obsolete key of the enable checkbox, read only while the list above has never been saved. |
+| `WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS` | `wp_awesome_public_ajax_actions` | Obsolete key holding the list that checkbox switched. Read in the same place; never written. |
 | `WP_AWESOME_OPTION_LEGACY_ENABLED`  | _(empty)_                 | Legacy "gate enabled" key to migrate from. Empty means none.    |
 | `WP_AWESOME_GATE_FALLBACK_SCOPE`    | `website`                 | Scope used when the stored value is missing or unrecognised.    |
 | `WP_AWESOME_GATE_ACCESS_LOG_PATH`   | _(empty)_                 | Access log to read the recently-denied report from.             |
@@ -260,7 +262,9 @@ Option **keys** are injectable so that an existing site keeps its own. They hold
 allowlist gating a public site among them — and renaming a key means writing another migration and
 getting it right on a security control, for no functional gain.
 
-Only the stored **value** is reinterpreted, in place, idempotently, on every load:
+Only the stored **value** is reinterpreted, in place, idempotently, on every load. No key holding a
+live setting is renamed and no stored row is deleted; where a schema changed shape, the older row is
+left where it is and read through the fallback described below:
 
 | Stored                                        | Becomes    |
 | --------------------------------------------- | ---------- |
@@ -274,10 +278,32 @@ The chain runs newest schema first, so an install on the oldest one still lands 
 unrecognised value is left in the database rather than overwritten: it is the only evidence that
 something restored the wrong data, and resolution already fails safe without needing to write.
 
-**The public AJAX action list has no migration, deliberately.** It is new, it has no earlier schema,
-and an install adopting this version starts with no exemptions — which is the safe state. If the
-public frontend fetches content from `admin-ajax.php`, configure the list and enable the section after deploy; until then
-those requests receive 403 from a blocked address in `admin` scope.
+### The allowed AJAX action list, which has an earlier schema
+
+A previous version of this screen stored the same list under `WP_AWESOME_OPTION_PUBLIC_AJAX_ACTIONS`
+**next to an enable checkbox** in `WP_AWESOME_OPTION_PUBLIC_AJAX_ENABLED`. The checkbox is gone: the
+list is now the whole setting, under its own key `WP_AWESOME_OPTION_PUBLIC_AJAX_LIST`.
+
+The two obsolete keys are therefore read in **one place** — the fallback used while the new key has
+never been saved — and that fallback only exists to keep the effective permission state unchanged
+across the upgrade:
+
+| Stored before the upgrade                                    | In force afterwards                                          |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| checkbox `'1'` and a usable list                              | that list, unchanged, with no save needed                     |
+| checkbox `'1'` and an empty, comment-only or malformed list    | nothing, exactly as before                                    |
+| checkbox `'0'`, an absent checkbox, or anything else         | nothing; the stored names are kept but stay inert             |
+| no rows at all (fresh install)                                | nothing                                                       |
+
+**A deliberately switched-off list is never adopted by the upgrade.** It is not shown in the form
+either, because pre-filling it would mean the next save of any field on the screen activated names
+nobody retyped; the screen says the names are preserved and where they are stored instead. Retyping
+the ones that are wanted and saving is the only path that activates anything — and that save writes
+the new key, after which the obsolete pair is never consulted again.
+
+Once the new key exists, it is authoritative for good, **including when it is empty**: saving an
+empty list revokes every exemption, and the old row cannot resurrect it. Nothing is deleted, so a
+rollback to the previous plugin version still finds the list it wrote.
 
 ## The access-log report
 

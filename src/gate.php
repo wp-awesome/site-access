@@ -226,22 +226,73 @@ function wpaw_parse_public_ajax_actions(mixed $raw): ?array {
 }
 
 /**
- * Whether the administrator has switched the public AJAX exemption section on.
+ * Whether this installation has ever saved the steady-state action list.
  *
- * OFF BY DEFAULT, AND ANYTHING BUT '1' IS OFF. The toggle is a stored setting rather than a
- * constant because the set of public endpoints changes at content-operation time; it is explicit
- * because a site that does not fetch through `admin-ajax.php` should never expose one by accident.
- * The strict comparison matters: `(bool) 'anything'` is true, and resolving the likeliest typo
- * toward "on" would grant exemptions nobody asked for.
+ * The existence of the row — including a deliberately saved EMPTY string — is what separates a list
+ * the administrator owns from one an older version left behind. `get_option()` returns the default
+ * for a row that does not exist and the stored value otherwise, so a default of `false` distinguishes
+ * the two without writing anything.
  */
-function wpaw_gate_public_ajax_enabled(): bool {
-	$key = wpaw_option_key('public_ajax_enabled');
+function wpaw_public_ajax_list_stored(): bool {
+	$key = wpaw_option_key('public_ajax_list');
 
-	if ('' === $key) {
-		return false;
+	return '' !== $key && false !== get_option($key, false);
+}
+
+/**
+ * The action list the version with an enable checkbox was exempting, or an empty string.
+ *
+ * ISOLATED ON PURPOSE. This pair is obsolete and is read in exactly one place, the fallback in
+ * `wpaw_public_ajax_list_value()`, which runs only while the steady-state row has never been saved.
+ * Nothing else may consult the old switch; a steady-state path that still asked it would make every
+ * later save conditional on a value the administrator can no longer see.
+ *
+ * ONLY THE LITERAL `'1'` WAS "ON", which is what makes the upgrade safe in both directions:
+ *
+ *   - `'1'` with a usable list keeps exempting exactly what it exempted before, so an upgrade does
+ *     not break a working public fetch.
+ *   - `'0'`, an absent row, or anything unrecognisable leaves the stored names INERT. They were not
+ *     in force before the upgrade and must not come into force because a checkbox disappeared. The
+ *     names stay where they are, so nothing is destroyed and a rollback still finds them.
+ *
+ * A non-string row reads as "nothing in force", never as a list to repair.
+ */
+function wpaw_legacy_public_ajax_list(): string {
+	$enabled_key = wpaw_option_key('legacy_public_ajax_enabled');
+	$actions_key = wpaw_option_key('legacy_public_ajax_actions');
+
+	if ('' === $enabled_key || '' === $actions_key) {
+		return '';
 	}
 
-	return '1' === get_option($key, '0');
+	if ('1' !== get_option($enabled_key, '0')) {
+		return '';
+	}
+
+	$stored = get_option($actions_key, '');
+
+	return is_string($stored) ? $stored : '';
+}
+
+/**
+ * The action list text in force, from the steady-state row or, on an installation that has never
+ * saved one, from the isolated legacy pair.
+ *
+ * ONE KEY, ONE MEANING. The list IS the setting: there is no separate switch, so "stored but off"
+ * cannot exist and cannot be mistaken for "on". A saved empty string is a deliberate revocation and
+ * is itself a saved row, which is why the legacy fallback cannot resurrect a list after it.
+ *
+ * Returned unparsed and unconverted, so a corrupt row reaches `wpaw_parse_public_ajax_actions()`
+ * intact and is refused there rather than being silently cleaned up here.
+ */
+function wpaw_public_ajax_list_value(): mixed {
+	$key = wpaw_option_key('public_ajax_list');
+
+	if ('' !== $key && false !== get_option($key, false)) {
+		return get_option($key, '');
+	}
+
+	return wpaw_legacy_public_ajax_list();
 }
 
 /**
@@ -252,49 +303,31 @@ function wpaw_gate_public_ajax_enabled(): bool {
  * The constant it replaced was hardcoded in the host stub, which made every new endpoint a code
  * change and quietly granted whatever the list happened to contain at build time.
  *
- * OFF MEANS EMPTY, AND EMPTY MEANS NO EXEMPTION. The list is preserved in the database while the
- * section is off, but this function refuses to apply it: switching the section off must gate every
- * AJAX request without destroying the list the administrator typed.
- *
- * MALFORMED CONFIGURATION FAILS CLOSED AS A WHOLE, through `wpaw_parse_public_ajax_actions()`.
+ * EMPTY MEANS NO EXEMPTION, AND SO DOES UNREADABLE. A missing, empty or comment-only list exempts
+ * nothing; malformed configuration fails closed as a whole through
+ * `wpaw_parse_public_ajax_actions()`, never as its readable remainder.
  *
  * @return list<string>
  */
 function wpaw_gate_public_ajax_actions(): array {
-	if (! wpaw_gate_public_ajax_enabled()) {
-		return [];
-	}
-
-	$key = wpaw_option_key('public_ajax_actions');
-
-	if ('' === $key) {
-		return [];
-	}
-
-	return wpaw_parse_public_ajax_actions(get_option($key, '')) ?? [];
+	return wpaw_parse_public_ajax_actions(wpaw_public_ajax_list_value()) ?? [];
 }
 
 /**
- * Whether the exemption section is disabled, or enabled with a usable, empty, or malformed list.
+ * Whether the list in force is usable, empty, or malformed.
  *
  * The settings screen reports `malformed` explicitly. Failing closed silently is correct for the
  * request, but an administrator looking at a list that is being ignored needs to be told that it is
  * being ignored — otherwise the screen shows a configuration that is not in force.
  *
- * @return 'disabled'|'usable'|'empty'|'malformed'
+ * @return 'usable'|'empty'|'malformed'
  */
 function wpaw_gate_public_ajax_actions_state(): string {
-	if (! wpaw_gate_public_ajax_enabled()) {
-		return 'disabled';
+	$raw = wpaw_public_ajax_list_value();
+
+	if (! is_string($raw)) {
+		return 'malformed';
 	}
-
-	$key = wpaw_option_key('public_ajax_actions');
-
-	if ('' === $key) {
-		return 'empty';
-	}
-
-	$raw = get_option($key, '');
 
 	if ('' === $raw) {
 		return 'empty';
@@ -307,6 +340,35 @@ function wpaw_gate_public_ajax_actions_state(): string {
 	}
 
 	return [] === $actions ? 'empty' : 'usable';
+}
+
+/**
+ * Whether an older version left action names stored while they were not in force.
+ *
+ * Reported on the screen and nowhere else. The names are preserved rather than deleted — they are
+ * the only record of what a previous administrator configured, and deleting a security setting to
+ * tidy a form is how a rollback finds nothing — but they are also NOT adopted: adopting them would
+ * grant access nobody chose under the current screen. An administrator who wants them back types
+ * them into the list and saves, which is the one path that activates anything.
+ */
+function wpaw_public_ajax_legacy_parked(): bool {
+	if (wpaw_public_ajax_list_stored()) {
+		return false;
+	}
+
+	if ('' !== wpaw_legacy_public_ajax_list()) {
+		return false;
+	}
+
+	$actions_key = wpaw_option_key('legacy_public_ajax_actions');
+
+	if ('' === $actions_key) {
+		return false;
+	}
+
+	$stored = get_option($actions_key, '');
+
+	return is_string($stored) && '' !== trim($stored);
 }
 
 /**
@@ -329,10 +391,10 @@ function wpaw_gate_should_deny(): bool {
 	if (WPAW_SCOPE_ADMIN === $scope) {
 		// THE ONE SHARED SURFACE. `admin-ajax.php` serves the public frontend's fetch endpoints and
 		// every privileged handler core, plugins and the theme register, under one URL. It is NOT
-		// exempted wholesale: only action names an administrator listed bypass the IP check, and
-		// only while the optional section is explicitly enabled. The section is off by default and
-		// the list starts empty. An action is a string matched EXACTLY; an array, a near-miss, or a
-		// differently-cased name is not an exemption and falls through to the gate.
+		// exempted wholesale: only action names an administrator listed bypass the IP check, and the
+		// list starts empty. The list is the whole setting — there is no separate switch that could
+		// leave stored names looking active. An action is a string matched EXACTLY; an array, a
+		// near-miss, or a differently-cased name is not an exemption and falls through to the gate.
 		//
 		// The list is per ACTION NAME, not per authentication state: WordPress wires `wp_ajax_` and
 		// `wp_ajax_nopriv_` for the same name, so listing a name exempts both. Only names that are
